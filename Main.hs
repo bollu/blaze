@@ -3,11 +3,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TupleSections #-}
 module Main where
 -- | Here, we consider a small implementation of the
 -- STOKE paper, where we stochastically optimise over a
 -- large space of programs.
 import Data.SBV
+import Data.SBV.Internals (CV)
 import Data.Word
 import Control.Monad
 import System.Random
@@ -19,6 +21,7 @@ import Control.Monad.Fail
 import Control.Monad.Writer
 import Control.Monad.Except
 import Control.Monad.Identity
+import qualified Data.Map as M
 
 
 data Inst a = Push a | Add | Mul | Lt | If deriving(Eq, Show, Ord)
@@ -144,14 +147,27 @@ symProgramUnify p sp =
             Nothing -> (1 :: SBV (Int32)) .== 0
             Just symval -> symval .== (fromIntegral finalv)
 
+tryGenerateProgram ::
+  Program Int
+  -> IO (Maybe (M.Map String CV))
+tryGenerateProgram p = do
+    smtResult <- sat $ do
+            sp <-  randSymProgram 10
+            lift $ print $ sp
+            pure $ symProgramUnify p1 sp
+    if modelExists smtResult
+    then pure $ Just $  getModelDictionary smtResult
+    else pure $ Nothing
+
+generateProgram :: Program Int
+  -> IO (M.Map String CV)
+generateProgram p = do
+    env <- tryGenerateProgram p
+    case env of
+      Nothing -> generateProgram p
+      Just a -> return a
+
 main :: IO ()
 main = do
-    putStrLn $ "concrete:"
-    print $ runConcrete p1 [2]
-    putStrLn $ "abstract:"
-    resio <- allSat $ do
-            sp <-  randSymProgram 1
-            liftIO $ print sp
-            pure $ symProgramUnify p1 sp
-    print $ (resio :: AllSatResult)
+    generateProgram p1 >>= print
 
