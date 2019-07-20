@@ -35,10 +35,12 @@ evalM :: M a -> IO a
 evalM ma = evalStateT ma 0
 
 
+-- | Number of parameters for the program
+type NParams = Int
 
 -- | symbolic expressions
 data SymE =
-   SymInt Int
+   SymInt Int32
    | SymSym String
    | SymAdd SymE SymE
    | SymMul SymE SymE
@@ -47,7 +49,8 @@ data SymE =
   deriving(Eq, Ord, Show)
 
 -- | regular instructions
-data Inst a = Push a | Add | Mul | Lt | If deriving(Eq, Show, Ord)
+data Inst a = Push a | Add | Mul | Lt | If
+  deriving(Eq, Show, Ord)
 
 
 type Program a = [Inst a]
@@ -140,8 +143,7 @@ symbolicTransfer =
 runSymbolic :: Program SymE -> [SymE] -> Maybe SymE
 runSymbolic p as = interpretM symbolicTransfer p as
 
--- | Compile the symbolic expression to an SBV expresion
-compileSymbolicToSBV :: SymE -> Symbolic (SBV Int32)
+compileSymbolicToSBV :: SymE -> (Symbolic (SBV Int32)
 compileSymbolicToSBV (SymInt x) = return $ fromIntegral x
 compileSymbolicToSBV (SymSym x) = symbolic x
 compileSymbolicToSBV (SymAdd s1 s2) =
@@ -184,12 +186,6 @@ randSymInst = do
       3 -> return $ Mul
       4 -> return $ Lt
 
-
--- reifySymExpr :: SatResult -> SymE -> Int
--- reifySumExpr res (SymInt x) = x
--- reifySumExpr res (SymAdd x x') = x + x'
--- reifySumExpr res (SymMul x x') = x * x'
-
 -- | Reify a symbolic instruction into a real instruction
 -- by consulting the dictionary.
 reifySymInst :: SatResult -> Inst SymE -> Inst Int32
@@ -198,6 +194,17 @@ reifySymInst res (Push (SymSym s)) =
 reifySymInst _ Add = Add
 reifySymInst _ Mul = Mul
 reifySymInst _ Lt = Lt
+
+-- | Convert a concrete program into a symbolic program
+concrete2symInst :: Inst Int32 -> Inst SymE
+concrete2symInst (Push i) = Push (SymInt i)
+concrete2symInst Add = Add
+concrete2symInst Mul = Mul
+concrete2symInst Lt = Lt
+
+-- | Convert a concrete program into a symbolic program
+concrete2symProgram :: Program Int32 -> Program SymE
+concrete2symProgram = map concrete2symInst
 
 -- | Given a symbolic program and an SBV model dictionary,
 -- reify it into an actual program
@@ -229,87 +236,105 @@ perturbSymProgram p = do
 
 
 -- | Find a satisfyng assignment to a symbolic program
-unifySymProgram :: Program Int32
-  -> Program SymE
+unifySymProgram ::
+  NParams  -- ^ number of parameters
+  -> Program Int32 -- ^ concrete program
+  -> Program SymE -- ^ symbolic program
   -> M (Maybe (Program Int32))
-unifySymProgram p sp =
-  case liftA2 (,) (runConcrete p []) (runSymbolic sp []) of
-    Nothing -> return Nothing -- ^ program failed to run, return Nothing
-    Just (vprog, vsym) -> do
-      -- | create an SBV expression that we want
-      -- | Try to get a satisfying model
-      smtResult <- liftIO $ sat $ do
-         vsbv <- compileSymbolicToSBV vsym
-         return $ vsbv .== fromIntegral vprog
-      if not (modelExists smtResult)
-         then return Nothing
-         else return $ Just $ reifySymProgram smtResult sp
+unifySymProgram nparams c s = do
+  ids <- replicateM nparams genuniq
+  let params = [SymSym ("param-" <> show i) | i <- ids]
+  -- | Run the program as a symbolic effect on the stack
+  let mvc = runSymbolic (concrete2symProgram c) params
+  -- | Run the symbolic program as the same
+  let mvs = runSymbolic s params
+  smtResult <- liftIO $ sat $ do
+    case liftA2 (,) mvc mvs of
+      Nothing -> return $ 1 .== (0 :: SInt32)
+      Just (vc, vs) -> do
+        -- | We need to be careful here to not double allocate te
+        -- same symbol
+        sbvc <- compileSymbolicToSBV vc
+        sbvs <- compileSymbolicToSBV vs
+        return $ sbvc .== sbvs
+
+  if not (modelExists smtResult)
+     then return Nothing
+     else return $ Just $ reifySymProgram smtResult s
 
 -- | Provide a score to a random symbolic program.
-scoreSymProgram :: Program Int32 -- ^ target program
+scoreSymProgram :: NParams
+  -> Program Int32 -- ^ target program
   -> Program SymE -- ^ current symbolic program
   -> M Float
-scoreSymProgram p sp = do
-  sol <- unifySymProgram p sp
-  case sol of
+scoreSymProgram nparams c s = do
+  msol <- unifySymProgram nparams c s
+  case msol of
     Nothing -> return 0.0 -- ^ let there be some chance of accepting
                           --   invalid programs
-    Just reifysp ->
-      let Just (_, cost) = runCost concreteTransfer reifysp []
+    Just sol ->
+      let Just (_, cost) = runCost concreteTransfer sol []
        in return $ 2.0 ** (-1.0 * fromIntegral (getCost cost))
 
 
 
-mhStep :: Program Int32 -- ^ concrete program
+mhStep :: NParams ->
+      Program Int32 -- ^ concrete program
       -> Program SymE -- ^ current symbolic program
       -> M (Program SymE) -- ^ next symbolic program
-mhStep c s = do
-  a <- scoreSymProgram c s
+mhStep nparams c s = do
+  a <- scoreSymProgram nparams c s
   -- | perturb the current program to get the next program
   s' <- randSymProgram (length c * 2)-- perturbSymProgram s
-  a' <- scoreSymProgram c s'
+  a' <- scoreSymProgram nparams c s'
   -- | find acceptance ratio
   let accept = a' / a
   r <- randfloat (0, 1)
   return $ if r < accept then s' else s
 
 
-mhSteps :: Int -> Program Int32 -> Program SymE -> M (Program SymE)
-mhSteps 0 c s = return s
-mhSteps i c s = mhStep c s >>= \s' -> mhSteps (i - 1) c s'
+mhSteps :: Int
+        -> NParams
+        -> Program Int32
+        -> Program SymE -> M (Program SymE)
+mhSteps 0 nparams c s = return s
+mhSteps i nparams c s =
+  mhStep nparams c s >>= \s' -> mhSteps (i - 1) nparams c s'
 
 -- | get a lazy of sampled programs
-runMH :: Int -> Program Int32 -> Program SymE -> M [Program SymE]
-runMH 0 _ _ = return []
-runMH i c s = do
-     s' <- mhSteps 10 c s
-     nexts <- runMH (i - 1) c s'
+runMH :: Int
+      -> NParams
+      -> Program Int32 -> Program SymE -> M [Program SymE]
+runMH 0 nparams _ _ = return []
+runMH i nparams c s = do
+     s' <- mhSteps 10 nparams c s
+     nexts <- runMH (i - 1) nparams c s'
      return $ s:nexts
 
--- | person who runs the program needs to supply a stack value
-p1 :: Num a => Program a
-p1 = [Push 2
-     , Push 2
-     , Push 3
-     , Mul
-     , Add]
-type NParams = Int
+
 optimise :: NParams -- ^ number of parameters
-                 -> Program Int32  -- ^ original program
-                 -> M [Program Int32]
+            -> Program Int32  -- ^ original program
+            -> M [Program Int32]
 optimise nparams p = do
-  s <- randSymProgram (length p1 * 2)
-  samples <- runMH 100 p1 s
-  nub <$> catMaybes <$> traverse (unifySymProgram p) samples
+  s <- randSymProgram (length p  * 2)
+  samples <- runMH 10 nparams p s
+  nub <$> catMaybes <$> traverse (unifySymProgram nparams p) samples
+
+
+-- | Given number of params, run the program and find equivalent programs
+mainProgram :: NParams -> Program Int32 -> M ()
+mainProgram nparams p = do
+    liftIO $ putStrLn $ "----"
+    liftIO $ putStrLn $ "program: " <> show p
+    liftIO $ print $ runConcrete p []
+    opts <- optimise nparams p
+    forM_ opts $ \p -> do
+          liftIO $ print p
+          let Just (_, cost) =  runCost concreteTransfer p []
+          liftIO $ putStrLn $ "  cost: " <> show cost
 
 main :: IO ()
-main = do
-    print $ "program: " <> show p1
-    print $ runConcrete p1 []
-    evalM $ do
-      opts <- optimise 0 p1
-      forM_ opts $ \p -> do
-            liftIO $ print p
-            let Just (_, cost) =  runCost concreteTransfer p []
-            liftIO $ putStrLn $ "  cost: " <> show cost
+main = evalM $ do
+  mainProgram 0 [Push 2, Push 3, Push 3, Mul, Add]
+  mainProgram 1 [Push 2, Mul]
 
