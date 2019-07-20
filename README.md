@@ -7,6 +7,8 @@ to perform a particular task by using MCMC methods to explore the large
 search space.
 
 
+##### High level algorithm
+
 What we do is to "MCMC-sample the space of possible programs, with a
 scoring function based on program equivalence and performance". Broken
 down, the steps are:
@@ -31,6 +33,8 @@ down, the steps are:
 The results are quite impressive: Even with code as naive as what I've written,
 we are able to regain peephole optimisations that compilers perform essentially
 "for free".
+
+##### Sample output
 
 ```
 *** original: (nparams: 0 | [IPush 2,IPush 3,IAdd])***
