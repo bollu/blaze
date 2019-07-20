@@ -487,7 +487,7 @@ mhTrace n pc =
 optimiseProgram :: Program -> M ()
 optimiseProgram pc = do
   liftIO $ putStrLn $ "*** original: " <> show pc <> "***"
-  steps <- mhTrace 100 pc
+  steps <- mhTrace 1000 pc
   let descendingScore (s, _) (s', _) = compare s' s
   let opts = take 4 $ nub $
         sortBy descendingScore [(s, p) | (s, p) <- steps, s >= 2.0]
