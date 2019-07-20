@@ -4,6 +4,8 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TupleSections #-}
 module Main where
+import Data.Maybe (catMaybes)
+import Data.List (nub)
 -- | Here, we consider a small implementation of the
 -- STOKE paper, where we stochastically optimise over a
 -- large space of programs.
@@ -300,12 +302,9 @@ main = do
       s <- randSymProgram (length p1)
       perturbs <- perturbSymProgram s
       samples <- runMH 100 p1 s
-      forM_ samples $ \s -> do
-        score <- scoreSymProgram p1 s
-        munify <- unifySymProgram p1 s
-        case munify of
-          Nothing -> return ()
-          Just unifiedp -> do
-            liftIO $ print unifiedp
-            liftIO $ putStrLn $ "  score: " <> show score
+      unifieds <- nub <$> catMaybes <$> traverse (unifySymProgram p1) samples
+      forM_ unifieds $ \p -> do
+            liftIO $ print p
+            let Just (_, cost) =  runCost concreteTransfer p []
+            liftIO $ putStrLn $ "  cost: " <> show cost
 
