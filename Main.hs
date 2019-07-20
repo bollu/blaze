@@ -40,6 +40,9 @@ type M a =  StateT G IO a
 evalM :: M a -> IO a
 evalM ma = evalStateT ma (G 0)
 
+debug :: String -> M ()
+debug s = liftIO $ putStrLn $ " >" <> s
+
 
 -- | Parameter
 type Param = String
@@ -136,12 +139,15 @@ randConcreteExpr depth ps = do
   if depth <= 1 || k <= 4
   then do
     r <- randbool
-    if r then do
-      k <- randint8 (-128, 127) -- Int8
-      return $ EVal k
-    else do
-      u <- genuniq
-      return $ ESym $ "id-" <> show u
+    k <- randint8 (-128, 127) -- int8
+    return $ EVal k
+
+    -- if r then do
+    --   k <- randint8 (-128, 127) -- int8
+    --   return $ eval k
+    -- else do
+    --   u <- genuniq
+    --   return $ ESym $ "id-" <> show u
   else if k <= 7
   then do
     ldepth <- randint (1, (depth - 1))
@@ -204,10 +210,10 @@ runExpr env (ELt e e') =
   else 0
 
 
--- | Return proportion of runs the concrete program
+-- | Return nagree of runs the concrete program
 -- and symbolic program agree on their values
-numAgreeingRuns :: Expr -> Expr -> M Float
-numAgreeingRuns c s = do
+proportionAgreeingRuns :: Expr -> Expr -> M Float
+proportionAgreeingRuns c s = do
   -- | take parameters from concrete program and
   -- symbols in abstract program. We need to instantiate
   -- these with values
@@ -275,56 +281,66 @@ exprSymbols (EVal _) = []
 exprSymbols (EParam _) = []
 
 
+-- | baseline score given to anything that unified
+unifyScore :: Float
+unifyScore = 2.0
+
 -- | Provide a score to a random symbolic program.
 scoreExpr :: HasCallStack => Expr -- ^ taget expr
   -> Expr -- ^ symbolic expr
   -> M Float
 scoreExpr c s = do
-  nagree <- numAgreeingRuns c s
+  nagree <- proportionAgreeingRuns c s
   if nagree == 1.0
   then do
     msol <- unifySymExpr c s
     case msol of
-      Nothing -> return nagree
-      Just sol -> return $ 1.5 + 2.0 ** (-1.0 * (costExpr sol))
-  else return nagree
+      Nothing -> return $ 0.1 + nagree
+      Just sol -> return $ unifyScore + 2.0 ** (-1.0 * (costExpr sol))
+  else return $ 0.1 + nagree
 
 
-mhStep :: HasCallStack => Expr -- ^ concrete expression
-      -> Expr -- ^ current symbolic expression
-      -> M (Expr) -- ^ next symbolic program
-mhStep c s = do
-  a <- scoreExpr c s
+
+mhStep :: HasCallStack => Expr -- ^ concrete expression, score
+      -> (Float, Expr) -- ^ current symbolic expression
+      -> M (Float, Expr) -- ^ next symbolic program, score
+mhStep c (score, s) = do
   -- | get a new random expression
   s' <- randConcreteExpr 4 (exprParams c)
-  a' <- scoreExpr c s'
+  score' <- scoreExpr c s'
   -- | find acceptance ratio
-  let accept = a' / a
+  let accept = score' / score
+  -- debug $ "proposal: " <> show s' <> " | score: " <> show score' <> " | accept: " <> show accept
   r <- randfloat (0, 1)
-  return $ if r < accept then s' else s
+  return $ if r < accept then (score', s') else (score, s)
 
 
 mhSteps :: Int
         -> Expr
-        -> Expr -> M (Expr)
+        -> (Float, Expr) -> M (Float, Expr)
 mhSteps 0 c s = return s
 mhSteps i c s =
   mhStep c s >>= \s' -> mhSteps (i - 1) c s'
 
--- | Get a list of sampled programs
-runMH :: HasCallStack => Int -> Expr -> Expr -> M [Expr]
-runMH 0 _ _ = return []
-runMH i c s = do
-     s' <- mhSteps 5 c s
-     nexts <- runMH (i - 1) c s'
-     return $ s:nexts
+-- | Get a list of sampled programs by running metropolis hastings
+runMH :: HasCallStack => Int -- ^ number of samples wanted
+      -> Expr -- ^ concrete expression
+      -> M [(Float, Expr)] -- ^ list of runs with scores
+runMH i c =
+  let go 0 _ _ = return []
+      go i c (score, s) = do
+        (score', s') <- mhSteps 5 c (score, s)
+        nexts <- go (i - 1) c (score', s')
+        return $ (score, s):nexts
+  in do score <- scoreExpr c c
+        go i c (score, c)
 
 
 optimise :: HasCallStack => Expr -> M [Expr]
 optimise c = do
-  s <- randConcreteExpr 3 (exprParams c)
-  samples <- runMH 300 c s
-  nub <$> catMaybes <$> traverse (unifySymExpr c) samples
+  samples <- runMH 3000 c
+  -- | score >= 1 means that it unified.
+  return $ nub $ [e | (score, e) <- samples, score >= unifyScore]
 
 
 -- | Given number of params, run the program and find equivalent programs
@@ -341,4 +357,5 @@ main :: HasCallStack => IO ()
 main = evalM $ do
   optimiseAndLog (EMul (EVal 2) (EVal 3))
   optimiseAndLog (EMul (EVal 2) (EParam "x"))
+  optimiseAndLog (ELt (EMul (EParam "x") (EVal 1)) (EMul (EParam "y") (EVal 1)))
 
