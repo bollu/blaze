@@ -445,7 +445,7 @@ scoreProgram pc ps = do
   if nagree /= 1.0
   then return $ 0.1 + nagree
   else do
-    res <- liftIO $ sat $ setTimeOut 500 >> smtQueryEquivProgram pc ps
+    res <- liftIO $ sat $ setTimeOut 100 >> smtQueryEquivProgram pc ps
     if not $ modelExists res
     then return $ 0.1 + nagree
     else return $ 2.0 + 2.0 ** (-1.0 * costProgram ps)
@@ -486,10 +486,11 @@ mhTrace n pc =
 
 optimiseProgram :: Program -> M ()
 optimiseProgram pc = do
-  liftIO $ putStrLn $ "original: " <> show pc
-  steps <- mhTrace 10000 pc
+  liftIO $ putStrLn $ "*** original: " <> show pc <> "***"
+  steps <- mhTrace 100 pc
   let descendingScore (s, _) (s', _) = compare s' s
-  let opts = take 4 $ nub $ sortBy descendingScore [(s, p) | (s, p) <- steps, s >= 2.0]
+  let opts = take 4 $ nub $
+        sortBy descendingScore [(s, p) | (s, p) <- steps, s >= 2.0]
   forM_ opts $ \(s, p) -> do
     liftIO $ putStrLn $ show (progInsts p) <> " | " <> "score: " <> show s
 
@@ -497,6 +498,8 @@ optimiseProgram pc = do
 mainInsts :: IO ()
 mainInsts = evalM $ do
   optimiseProgram $ Program 0 [IPush 2, IPush 3, IAdd]
+  optimiseProgram $ Program 1 [IPush 2, IMul]
+  optimiseProgram $ Program 1 [IDup, IAnd]
 
 -- main = mainExpr
 main :: IO ()
