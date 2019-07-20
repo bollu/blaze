@@ -11,6 +11,7 @@ import Data.List (nub, sortOn)
 -- | Here, we consider a small implementation of the
 -- STOKE paper, where we stochastically optimise over a
 -- large space of programs.
+import Data.Bits
 import Data.SBV
 import Data.SBV.Internals (CV)
 import Data.Word
@@ -47,23 +48,29 @@ debug s = liftIO $ putStrLn $ " >" <> s
 -- | Parameter
 type Param = String
 
+-- | Binary operation
+data Binop = Add | Mul | And | Lt deriving(Eq, Ord)
+
+instance Show Binop where
+  show Add = "+"
+  show Mul = "*"
+  show And = "and"
+  show Lt = "<"
 
 -- | Expressions
 data Expr = EVal Int8
           | ESym String
           | EParam Param
-          | EAdd Expr Expr
-          | EMul Expr Expr
-          | ELt Expr Expr
+          | EBinop Binop Expr Expr
+          | ENot Expr
           | EIte Expr Expr Expr deriving(Eq, Ord)
 
 instance Show Expr where
   show (EVal a)=  show a
   show (ESym a)= "s-" <> a
   show (EParam a) = "p-" <> a
-  show (EAdd e e') = "(+ " <> show e <> " " <> show e' <> ")"
-  show (EMul e e') = "(* " <> show e <> " " <> show e' <> ")"
-  show (ELt e e') = "(< " <> show e <> " " <> show e' <> ")"
+  show (EBinop op e e') = "("  <> show op <> " " <> show e <> " " <> show e' <> ")"
+  show (ENot e) = "(not" <> show e <> ")"
   show (EIte i t e) = "(ite " <> " " <> show i <> " " <> show t <> " " <> show e <> ")"
 
 
@@ -84,20 +91,14 @@ compileToSBV m (EParam name) = do
       sym <- forall name
       return $ (sym, M.insert name sym m)
 
-compileToSBV m (EAdd e e') = do
+compileToSBV m (EBinop op e e') = do
   (e, m) <- (compileToSBV m e)
   (e', m) <- (compileToSBV m e')
-  return $ (e + e', m)
-
-compileToSBV m (EMul e e') = do
-  (e, m) <- (compileToSBV m e)
-  (e', m) <- (compileToSBV m e')
-  return $ ( e * e', m)
-
-compileToSBV m (ELt e e') = do
-  (e, m) <- (compileToSBV m e)
-  (e', m) <- (compileToSBV m e')
-  return $ (ite (e .< e') 1 0, m)
+  case op of
+    Add -> pure $ (e + e', m)
+    Mul -> pure $ (e * e', m)
+    Lt -> pure $ (ite (e .< e') 1 0, m)
+    And -> pure $ (e .&. e', m)
 
 compileToSBV m (EIte i t e) = do
   (i, m) <- (compileToSBV m i)
@@ -107,12 +108,19 @@ compileToSBV m (EIte i t e) = do
 
 -- | Return the computational cost of the expr
 costExpr :: HasCallStack => Expr -> Float
-costExpr (EAdd e e') = 1 + costExpr e + costExpr e'
-costExpr (EMul e e') = 4 + costExpr e + costExpr e'
+costExpr (EBinop op e e') =
+  let l = costExpr e
+      r = costExpr e'
+      cur = case op of
+              Add -> 1
+              Mul -> 4
+              And -> 1
+              Lt -> 1
+  in l + r + cur
 costExpr (EVal _) = 0
-costExpr (ESym _) = 0
-costExpr (EParam _) = 0
-costExpr (ELt e e') = 1 + costExpr e + costExpr e'
+costExpr (ESym _) = 1
+costExpr (EParam _) = 1
+costExpr (EIte i t e) = costExpr i + (costExpr t + costExpr e) * 0.5
 
 -- | generate a unique label
 genuniq :: M Uniq
@@ -137,34 +145,27 @@ randExpr :: Int -- ^ depth
  -> [Param] -- ^ parameter names
  -> M Expr
 randExpr depth ps = do
-  k <- randint (1, 7 + length ps)
+  k <- randint (1, 8 + length ps)
   if depth <= 1 || k <= 4
   then do
     r <- randbool
     k <- randint8 (-128, 127) -- int8
     return $ EVal k
-  else if k <= 7
+  else if k <= 8
   then do
     ldepth <- randint (1, (depth - 1))
     l <- randExpr ldepth ps
     rdepth <- randint (1, (depth - 1))
     r <-  randExpr rdepth ps
-    case k of
-      5 -> return $ EAdd l r
-      6 -> return $ EMul l r
-      7 -> return $ ELt l r
+    let op = case k of
+                5 -> Add
+                6 -> Mul
+                7 -> Lt
+                8 -> And
+    pure $ EBinop op l r
   else do
-      ix <- randint (0, k - 8)
+      ix <- randint (0, k - 9)
       return $ EParam (ps !! ix)
-
--- | Check if an expression has a symbolic value
-exprHasSym :: Expr -> Bool
-exprHasSym (ESym _) = True
-exprHasSym (EParam _) = True
-exprHasSym (EVal _) = False
-exprHasSym (EAdd e e') = exprHasSym e || exprHasSym e'
-exprHasSym (EMul e e') = exprHasSym e || exprHasSym e'
-exprHasSym (ELt e e') = exprHasSym e || exprHasSym e'
 
 
 -- | run an expression with values for parameters and symbols
@@ -172,13 +173,19 @@ runExpr :: M.Map String Int8 -> Expr -> Int8
 runExpr _ (EVal i) = i
 runExpr env (ESym s) = env M.! s
 runExpr env (EParam s) = env M.! s
-runExpr env (EAdd e e') = runExpr env e + runExpr env e'
-runExpr env (EMul e e') = runExpr env e * runExpr env e'
-runExpr env (ELt e e') =
-  if runExpr env e < runExpr env e'
-  then 1
-  else 0
-
+runExpr env (EIte i t e) =
+  case runExpr env i of
+    1 -> runExpr env t
+    0 -> runExpr env e
+runExpr env (EBinop op e e') =
+  let l = runExpr env e
+      r = runExpr env e'
+      f = case op of
+            Add -> (+)
+            Mul -> (*)
+            Lt -> \x y -> if x < y then 1 else 0
+            And -> (.&.)
+  in f l r
 
 -- | Return nagree of runs the concrete program
 -- and symbolic program agree on their values
@@ -220,12 +227,12 @@ unifySymExpr c s = do
 -- | Materialize all symbolic nodes with their concrete values if possible
 materializeExpr :: HasCallStack => SatResult -> Expr -> Maybe Expr
 materializeExpr res (EVal v) = return $ EVal v
-materializeExpr res (EAdd e e') =
-  liftA2 EAdd (materializeExpr res e) (materializeExpr res e')
-materializeExpr res (EMul e e') =
-  liftA2 EMul (materializeExpr res e) (materializeExpr res e')
-materializeExpr res (ELt e e') =
-  liftA2 ELt (materializeExpr res e) (materializeExpr res e')
+materializeExpr res (EIte i t e) =
+  liftA3 EIte (materializeExpr res i)
+              (materializeExpr res t)
+              (materializeExpr res e)
+materializeExpr res (EBinop op e e') =
+  liftA2 (EBinop op) (materializeExpr res e) (materializeExpr res e')
 materializeExpr res (ESym name) =
   (EVal <$> (getModelValue name res)) <|>
   (EParam <$> getModelUninterpretedValue name res)
@@ -233,9 +240,9 @@ materializeExpr res (EParam name) = pure (EParam name)
 
 -- | Gather the parameters used by this expression.
 exprParams :: HasCallStack => Expr -> [Param]
-exprParams (EAdd e e') = exprParams e <> exprParams e'
-exprParams (EMul e e') = exprParams e <> exprParams e'
-exprParams (ELt e e') = exprParams e <> exprParams e'
+exprParams (EBinop _ e e') = exprParams e <> exprParams e'
+exprParams (EIte i t e) =  exprParams i <> exprParams t <> exprParams e
+exprParams (ENot e) = exprParams e
 exprParams (ESym _) = []
 exprParams (EVal _) = []
 exprParams (EParam name) = [name]
@@ -243,12 +250,12 @@ exprParams (EParam name) = [name]
 
 -- | Gather the symbols used by this expression.
 exprSymbols :: HasCallStack => Expr -> [Param]
-exprSymbols (EAdd e e') = exprSymbols e <> exprSymbols e'
-exprSymbols (EMul e e') = exprSymbols e <> exprSymbols e'
-exprSymbols (ELt e e') = exprSymbols e <> exprSymbols e'
+exprSymbols (EBinop _ e e') = exprSymbols e <> exprSymbols e'
+exprSymbols (ENot e) = exprSymbols e
 exprSymbols (ESym s) = [s]
 exprSymbols (EVal _) = []
 exprSymbols (EParam _) = []
+exprSymbols (EIte i t e) = exprSymbols i <> exprSymbols t <> exprSymbols e
 
 
 -- | baseline score given to anything that unified
@@ -324,8 +331,11 @@ optimiseAndLog c = do
 
 main :: HasCallStack => IO ()
 main = evalM $ do
-  optimiseAndLog (EMul (EVal 2) (EVal 3))
-  optimiseAndLog (EMul (EVal 2) (EParam "x"))
-  optimiseAndLog (ELt (EMul (EParam "x") (EVal 1)) (EMul (EParam "y") (EVal 1)))
+  optimiseAndLog (EBinop Mul (EVal 2) (EVal 3))
+  optimiseAndLog (EBinop Mul (EVal 2) (EParam "x"))
+  optimiseAndLog (EIte (EVal 1) (EParam "x") (EParam "x"))
+  optimiseAndLog (EBinop And (EParam "x") (EParam "x"))
+  optimiseAndLog (EBinop Lt (EBinop Mul (EParam "x") (EVal 1))
+                         (EBinop Mul (EParam "y") (EVal 1)))
 
 
