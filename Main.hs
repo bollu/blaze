@@ -54,7 +54,7 @@ data SymE =
   deriving(Eq, Ord, Show)
 
 -- | regular instructions
-data Inst a = Push a | Add | Mul | Lt | If
+data Inst a = Push a | Add | Mul | Lt | If | Dup
   deriving(Eq, Show, Ord)
 
 
@@ -88,6 +88,8 @@ interpretM Transfer{..} (Mul:is) (a:a':as) = do
 interpretM Transfer{..} (Lt:is) (a:a':as) = do
     o <- tlt a a'
     interpretM Transfer{..} is (o:as)
+interpretM Transfer{..} (Dup:is) (a:as) = do
+    interpretM Transfer{..} is (a:a:as)
 interpretM _ _ _  = Control.Monad.Fail.fail ""
 
 
@@ -204,7 +206,7 @@ randfloat (lo, hi) = liftIO $ getStdRandom $ randomR (lo, hi)
 -- | Generate a random instruction.
 randSymInst ::  M (Inst SymE)
 randSymInst = do
-    choice <- randint (1, 4)
+    choice <- randint (1, 5)
     case choice of
       1 -> do
           uuid <- genuniq
@@ -213,21 +215,24 @@ randSymInst = do
       2 -> return $ Add
       3 -> return $ Mul
       4 -> return $ Lt
+      5 -> return $ Dup
 
 -- | Reify a symbolic instruction into a real instruction
 -- by consulting the dictionary.
-reifySymInst :: SatResult -> Inst SymE -> Inst Int32
-reifySymInst res (Push (SymParam s)) = error $ "param: " <> s
-reifySymInst res (Push (SymSym s)) =
-  let Just (v :: Int32) = trace ("s: " <> s) $ getModelValue s res in Push v
-reifySymInst _ Add = Add
-reifySymInst _ Mul = Mul
-reifySymInst _ Lt = Lt
+materializeSymInst :: SatResult -> Inst SymE -> Maybe (Inst Int32)
+materializeSymInst res (Push (SymParam s)) = error $ "param in push"
+materializeSymInst res (Push (SymSym s)) = do
+  v <- getModelValue s res
+  return $ Push v
+materializeSymInst _ Add = return Add
+materializeSymInst _ Mul = return Mul
+materializeSymInst _ Lt = return Lt
+materializeSymInst _ Dup = return Dup
 
 -- | Given a symbolic program and an SBV model dictionary,
 -- reify it into an actual program
-reifySymProgram :: SatResult -> Program SymE -> Program Int32
-reifySymProgram res s = trace ("reifyp: " <> show s) $ map (reifySymInst  res) s
+materializeSymProgram :: SatResult -> Program SymE -> Maybe (Program Int32)
+materializeSymProgram res s = trace ("reifyp: " <> show s) $ traverse (materializeSymInst  res) s
 
 -- | Convert a concrete program into a symbolic program
 concrete2symInst :: Inst Int32 -> Inst SymE
@@ -235,6 +240,7 @@ concrete2symInst (Push i) = Push (SymInt i)
 concrete2symInst Add = Add
 concrete2symInst Mul = Mul
 concrete2symInst Lt = Lt
+concrete2symInst Dup = Dup
 
 -- | Convert a concrete program into a symbolic program
 concrete2symProgram :: Program Int32 -> Program SymE
@@ -290,7 +296,11 @@ unifySymProgram nparams c s = do
 
   if not (modelExists smtResult)
      then return Nothing
-     else return $ Just $ reifySymProgram smtResult s
+     -- | note that this step may fail, due to the fact that the model
+     -- may do something like:
+     -- transform push 2; mul
+     -- into: push p; push p; add; where "p" is the symbol of the parameter.
+     else return $ materializeSymProgram smtResult s
 
 -- | Provide a score to a random symbolic program.
 scoreSymProgram :: NParams
