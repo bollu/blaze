@@ -6,35 +6,46 @@ STOKE is a superoptimizer that finds optimal instruction sequences
 to perform a particular task by using MCMC methods to explore the large
 search space.
 
-Surprisingly, even a really naive implementation of this seems to do okay.
+
+What we do is to "MCMC-sample the space of possible programs, with a
+scoring function based on program equivalence and performance". Broken
+down, the steps are:
+
+- Start with the original program `p`
+- Perturb it slightly to get a program `q` (add an instruction, remove some instructions, change an instruction)
+- Assign a score to `q` by sending `p` and `q` random inputs, and checking
+  how often they answer the same.
+- If they answered the same for _all_ random inputs, ask an SMT solver
+  nicely if `p` and `q` are _equivalent_. If she's in a good mood and the
+  universe is kind, the answer is yes.
+- Now, score `q` based on the factors of:
+    1. Are `p` and `q` semantically equivalent?
+    2. On how many inputs `p` and `q` had the same answer?
+    3. is `q` faster than `p`?
+- Now, either pick `q` to be the new `p` or stay at `p` depending on `q`'s
+  score.
+- Repeat ~10,000 times.
+- Order best `q`s visited.
 
 
-For example, here is a list of input and output expressions, with `p-x`
-and `p-y` being parameters.
+The results are quite impressive: Even with code as naive as what I've written,
+we are able to regain peephole optimisations that compilers perform essentially
+"for free".
 
 ```
-----
-program: (* 2 3)
-6 // constant folding
-  cost: 0.0
-(+ -116 122)
-  cost: 1.0
-(+ -43 49)
-  cost: 1.0
-----
-program: (* 2 p-x)
-(+ p-x p-x) // strength reduction
-  cost: 1.0
-(* 2 p-x)
-  cost: 4.0
-----
-program: (< (* p-x 1) (* p-y 1))
-(< p-x p-y) // constant folding
-  cost: 1.0
-(< (* p-x 1) (* p-y 1))
-  cost: 9.0
+*** original: Program {progNParams = 0, progInsts = [IPush 2,IPush 3,IAdd]}***
+[IPush 5] | score: 2.5 // constant folding
+[IPush 2,IPush 3,IAdd] | score: 2.125
+[IPush 2,IPush 3,ISwap,IAdd] | score: 2.0625
+
+*** original: Program {progNParams = 1, progInsts = [IPush 2,IMul]}***
+[IDup,IAdd] | score: 2.25 // strength reduction: 2 * x -> x + x
+[IDup,ISwap,IAdd] | score: 2.125
+[IDup,ISwap,ISwap,IAdd] | score: 2.0625
+[IDup,ISwap,ISwap,ISwap,IAdd] | score: 2.03125
+
+*** original: Program {progNParams = 1, progInsts = [IDup,IAnd]}***
+[] | score: 3.0 // constant folding: x & x == x
+[IDup,IAnd] | score: 2.25
+[IDup,ISwap,IAnd] | score: 2.125
 ```
-
-The problem with using expressions is that it is hard to represent illegal
-expressions, and thus it is hard to "gradually" explore the search space.
-
