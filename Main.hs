@@ -34,7 +34,12 @@ randbool :: IO Bool
 randbool = getStdRandom $ random
 
 data Inst = IPush Int8 | IAdd | IMul | IDup | IAnd | ISwap deriving(Eq, Show, Ord)
-data Program = Program { progNParams :: Int, progInsts :: [Inst] } deriving (Eq, Show, Ord)
+data Program = Program { progNParams :: Int, progInsts :: [Inst] }
+  deriving (Eq, Ord)
+
+instance Show Program where
+  show (Program nparams insts) =
+     "(" <> "nparams: " <> show nparams <> " | " <> show insts <> ")"
 
 randInst :: IO Inst
 randInst = do

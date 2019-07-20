@@ -33,18 +33,18 @@ we are able to regain peephole optimisations that compilers perform essentially
 "for free".
 
 ```
-*** original: Program {progNParams = 0, progInsts = [IPush 2,IPush 3,IAdd]}***
+*** original: (nparams: 0 | [IPush 2,IPush 3,IAdd])***
 [IPush 5] | score: 2.5 // constant folding
 [IPush 2,IPush 3,IAdd] | score: 2.125
 [IPush 2,IPush 3,ISwap,IAdd] | score: 2.0625
 
-*** original: Program {progNParams = 1, progInsts = [IPush 2,IMul]}***
+*** original: (nparams: 1 | [IPush 2,IMul])***
 [IDup,IAdd] | score: 2.25 // strength reduction: 2 * x -> x + x
 [IDup,ISwap,IAdd] | score: 2.125
 [IDup,ISwap,ISwap,IAdd] | score: 2.0625
 [IDup,ISwap,ISwap,ISwap,IAdd] | score: 2.03125
 
-*** original: Program {progNParams = 1, progInsts = [IDup,IAnd]}***
+*** original: (nparams: 1 | progInsts = [IDup,IAnd])***
 [] | score: 3.0 // constant folding: x & x == x
 [IDup,IAnd] | score: 2.25
 [IDup,ISwap,IAnd] | score: 2.125
