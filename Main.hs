@@ -3,7 +3,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE FlexibleContexts #-}
 module Main where
+import GHC.Stack
 import Data.Maybe (catMaybes)
 import Data.List (nub)
 -- | Here, we consider a small implementation of the
@@ -29,164 +31,83 @@ import Debug.Trace
 type Uniq = Int
 --
 -- | Global state
-data G = G { guniq :: Uniq, gsymbols :: M.Map String (SBV Int32) }
+data G = G { guniq :: Uniq }
 
 -- | Top level monad all our computations run in
 type M a =  StateT G IO a
 
 -- | execute a computation inside our `M`
 evalM :: M a -> IO a
-evalM ma = evalStateT ma (G 0 mempty)
+evalM ma = evalStateT ma (G 0)
 
 
--- | Number of parameters for the program
-type NParams = Int
+-- | Parameter
+type Param = String
 
--- | symbolic expressions
-data SymE =
-   SymInt Int32
-   | SymSym String
-   | SymParam String
-   | SymAdd SymE SymE
-   | SymMul SymE SymE
-   | SymLt SymE SymE
-   | SymIte SymE SymE SymE
-  deriving(Eq, Ord, Show)
+data Expr = EVal Int8
+          | ESym String
+          | EParam Param
+          | EAdd Expr Expr
+          | EMul Expr Expr
+          | ELt Expr Expr
+          | EIte Expr Expr Expr deriving(Eq, Ord)
 
--- | regular instructions
-data Inst a = Push a | Add | Mul | Lt | If | Dup
-  deriving(Eq, Show, Ord)
-
-
-type Program a = [Inst a]
-type Stack a = [a]
+instance Show Expr where
+  show (EVal a)=  show a
+  show (ESym a)= "s-" <> a
+  show (EParam a) = "p-" <> a
+  show (EAdd e e') = "(+ " <> show e <> " " <> show e' <> ")"
+  show (EMul e e') = "(* " <> show e <> " " <> show e' <> ")"
+  show (ELt e e') = "(< " <> show e <> " " <> show e' <> ")"
+  show (EIte i t e) = "(ite " <> " " <> show i <> " " <> show t <> " " <> show e <> ")"
 
 
--- | Transfer function
-data Transfer m a =
-    Transfer { tadd :: a -> a -> m a
-          , tmul :: a -> a -> m a
-          , tlt :: a -> a -> m a
-          , ttrue :: a -> Bool
-          }
-
--- | Monadic interpretMer of the code, to run arbitrary effects.
-interpretM :: (MonadFail m, Monad m)
-           => Transfer m a
-           -> Program a
-           -> [a]
-           -> m a
-interpretM Transfer{..} [] [a] = return a
-interpretM Transfer{..} ((Push a):is) as =
-    interpretM Transfer{..} is (a:as)
-interpretM Transfer{..} (Add:is) (a:a':as) = do
-    o <- tadd a a'
-    interpretM Transfer{..} is (o:as)
-interpretM Transfer{..} (Mul:is) (a:a':as) = do
-    o <- tmul a a'
-    interpretM Transfer{..} is (o:as)
-interpretM Transfer{..} (Lt:is) (a:a':as) = do
-    o <- tlt a a'
-    interpretM Transfer{..} is (o:as)
-interpretM Transfer{..} (Dup:is) (a:as) = do
-    interpretM Transfer{..} is (a:a:as)
-interpretM _ _ _  = Control.Monad.Fail.fail ""
-
-
-concreteTransfer :: Transfer Maybe Int32
-concreteTransfer =
-    Transfer { tadd = \a a' -> pure $ a + a'
-          , tmul = \a a' -> pure $ a * a'
-          , tlt = \a a' -> pure $ if a < a' then 1 else 0
-          , ttrue = \a -> a == 1
-          }
-
--- | concreteTransfer evaluator
-runConcrete :: Program Int32 -> [Int32] -> Maybe Int32
-runConcrete p as = interpretM concreteTransfer p as
-
--- | costs are additive
-type Cost = Sum Int
-
--- | Extract the underlying Int from cost
-getCost :: Cost -> Int
-getCost = getSum
-
-costTransferT :: (MonadFail m, Monad m)
-              => Transfer m a
-              -> Transfer (WriterT Cost m) a
-costTransferT Transfer{..} =
-    Transfer { tadd = \a a' -> do
-                o <- lift $ tadd a a'
-                writer $ (o, 1)
-          , tmul = \a a' -> do
-                o <- lift $ tmul a a'
-                writer $ (o, 4)
-          , tlt = \a a' -> do
-                o <- lift $ tmul a a'
-                writer $ (o, 1)
-          , ttrue = ttrue
-          }
-
--- | Evaluator that figures out the cost
-runCost :: (MonadFail m, Monad m) =>
-    Transfer m a
-    -> Program a
-    -> [a]
-    -> m (a, Cost)
-runCost t p as = runWriterT $ interpretM (costTransferT t) p as
-
-
-symbolicTransfer :: Transfer Maybe (SymE)
-symbolicTransfer =
-    Transfer { tadd = \a a' -> pure $ SymAdd a a'
-          , tmul = \a a' -> pure $ SymMul a a'
-          , tlt = \a a' -> pure $
-              SymIte (SymLt a a') (SymInt 1) (SymInt 0)
-          , ttrue = \a -> a == SymInt 1
-          }
-
--- | create a symbolic program
-runSymbolic :: Program SymE -> [SymE] -> Maybe SymE
-runSymbolic p as = interpretM symbolicTransfer p as
-
-compileSymbolicToSBV :: M.Map String (SInt32) ->
-  SymE ->
-  Symbolic (SInt32, M.Map String (SInt32))
-compileSymbolicToSBV m (SymInt x) = return $ (fromIntegral x, m)
-compileSymbolicToSBV m (SymSym name) =
+type Env = M.Map String SInt8
+compileToSBV :: HasCallStack => Env -> Expr -> Symbolic (SInt8, Env)
+compileToSBV m (EVal v) = return $ (fromIntegral v, m)
+compileToSBV m (ESym name) =
   case m M.!? name of
-    Just sym -> return ( sym, m)
+    Just sym -> return (sym, m)
     Nothing -> do
-       sym <- sInt32 name
-       return $ (sym, M.insert name sym m)
-compileSymbolicToSBV m (SymParam name) = do
+      sym <- exists name
+      return $ (sym, M.insert name sym m)
+
+compileToSBV m (EParam name) = do
   case m M.!? name of
-    Just sym -> return ( sym, m)
+    Just sym -> return (sym, m)
     Nothing -> do
-       sym <- forall name
-       return $ (sym, M.insert name sym m)
-compileSymbolicToSBV m (SymAdd s1 s2) = do
-  (s1, m) <- (compileSymbolicToSBV m s1)
-  (s2, m) <- (compileSymbolicToSBV m s2)
-  return $ (s1 + s2, m)
+      sym <- forall name
+      return $ (sym, M.insert name sym m)
 
-compileSymbolicToSBV m (SymMul s1 s2) = do
-  (s1, m) <- (compileSymbolicToSBV m s1)
-  (s2, m) <- (compileSymbolicToSBV m s2)
-  return $ ( s1 * s2, m)
+compileToSBV m (EAdd e e') = do
+  (e, m) <- (compileToSBV m e)
+  (e', m) <- (compileToSBV m e')
+  return $ (e + e', m)
 
-compileSymbolicToSBV m (SymLt s1 s2) = do
-  (s1, m) <- (compileSymbolicToSBV m s1)
-  (s2, m) <- (compileSymbolicToSBV m s2)
-  return $ (ite (s1 .< s2) 1 0, m)
+compileToSBV m (EMul e e') = do
+  (e, m) <- (compileToSBV m e)
+  (e', m) <- (compileToSBV m e')
+  return $ ( e * e', m)
 
-compileSymbolicToSBV m (SymIte i t e) = do
-  (i, m) <- (compileSymbolicToSBV m i)
-  (t, m) <- (compileSymbolicToSBV m t)
-  (e, m) <- (compileSymbolicToSBV m e)
+compileToSBV m (ELt e e') = do
+  (e, m) <- (compileToSBV m e)
+  (e', m) <- (compileToSBV m e')
+  return $ (ite (e .< e') 1 0, m)
+
+compileToSBV m (EIte i t e) = do
+  (i, m) <- (compileToSBV m i)
+  (t, m) <- (compileToSBV m t)
+  (e, m) <- (compileToSBV m e)
   return $ (ite  (i .== 1) t e, m)
 
+-- | Return the computational cost of the expr
+costExpr :: HasCallStack => Expr -> Float
+costExpr (EAdd e e') = 1 + costExpr e + costExpr e'
+costExpr (EMul e e') = 4 + costExpr e + costExpr e'
+costExpr (EVal _) = 0
+costExpr (ESym _) = 0
+costExpr (EParam _) = 0
+costExpr (ELt e e') = 1 + costExpr e + costExpr e'
 
 -- | generate a unique label
 genuniq :: M Uniq
@@ -196,102 +117,119 @@ genuniq = state $ \G{..} -> (guniq, G{ guniq=guniq+1, ..})
 randint :: (Int, Int) -> M Int
 randint (lo, hi) = liftIO $ getStdRandom $ randomR (lo, hi)
 
-randint32 :: (Int32, Int32) -> M Int32
-randint32 (lo, hi) = liftIO $ getStdRandom $ randomR (lo, hi)
+randint8 :: (Int8, Int8) -> M Int8
+randint8 (lo, hi) = liftIO $ getStdRandom $ randomR (lo, hi)
 
 -- | random uniform float
 randfloat :: (Float, Float) -> M Float
 randfloat (lo, hi) = liftIO $ getStdRandom $ randomR (lo, hi)
 
--- | Generate a random instruction.
-randSymInst ::  M (Inst SymE)
-randSymInst = do
-    choice <- randint (1, 5)
-    case choice of
-      1 -> do
-          uuid <- genuniq
-          let name = "sym-" <> show uuid
-          return $ Push (SymSym name)
-      2 -> return $ Add
-      3 -> return $ Mul
-      4 -> return $ Lt
-      5 -> return $ Dup
+randbool :: M Bool
+randbool = liftIO $ getStdRandom $ random
 
--- | Reify a symbolic instruction into a real instruction
--- by consulting the dictionary.
-materializeSymInst :: SatResult -> Inst SymE -> Maybe (Inst Int32)
-materializeSymInst res (Push (SymParam s)) = error $ "param in push"
-materializeSymInst res (Push (SymSym s)) = do
-  v <- getModelValue s res
-  return $ Push v
-materializeSymInst _ Add = return Add
-materializeSymInst _ Mul = return Mul
-materializeSymInst _ Lt = return Lt
-materializeSymInst _ Dup = return Dup
+-- | Generate a random _concrete_ expression
+randConcreteExpr :: Int -- ^ depth
+ -> [Param] -- ^ parameter names
+ -> M Expr
+randConcreteExpr depth ps = do
+  k <- randint (1, 7 + length ps)
+  if depth <= 1 || k <= 4
+  then do
+    r <- randbool
+    if r then do
+      k <- randint8 (-128, 127) -- Int8
+      return $ EVal k
+    else do
+      u <- genuniq
+      return $ ESym $ "id-" <> show u
+  else if k <= 7
+  then do
+    ldepth <- randint (1, (depth - 1))
+    l <- randConcreteExpr ldepth ps
+    rdepth <- randint (1, (depth - 1))
+    r <-  randConcreteExpr rdepth ps
+    case k of
+      5 -> return $ EAdd l r
+      6 -> return $ EMul l r
+      7 -> return $ ELt l r
+  else do
+      ix <- randint (0, k - 8)
+      return $ EParam (ps !! ix)
 
--- | Given a symbolic program and an SBV model dictionary,
--- reify it into an actual program
-materializeSymProgram :: SatResult -> Program SymE -> Maybe (Program Int32)
-materializeSymProgram res s = trace ("reifyp: " <> show s) $ traverse (materializeSymInst  res) s
-
--- | Convert a concrete program into a symbolic program
-concrete2symInst :: Inst Int32 -> Inst SymE
-concrete2symInst (Push i) = Push (SymInt i)
-concrete2symInst Add = Add
-concrete2symInst Mul = Mul
-concrete2symInst Lt = Lt
-concrete2symInst Dup = Dup
-
--- | Convert a concrete program into a symbolic program
-concrete2symProgram :: Program Int32 -> Program SymE
-concrete2symProgram = map concrete2symInst
+-- | Check if an expression has a symbolic value
+exprHasSym :: Expr -> Bool
+exprHasSym (ESym _) = True
+exprHasSym (EParam _) = True
+exprHasSym (EVal _) = False
+exprHasSym (EAdd e e') = exprHasSym e || exprHasSym e'
+exprHasSym (EMul e e') = exprHasSym e || exprHasSym e'
+exprHasSym (ELt e e') = exprHasSym e || exprHasSym e'
 
 
--- | Generate a random program
-randSymProgram :: Int -- ^ max length
-            -> M (Program SymE) -- ^ symbolic program
-randSymProgram maxl = do
-    l <- liftIO $ getStdRandom $ randomR (1, maxl)
-    replicateM l randSymInst
+-- | Generate a random symbolic expression
+randSymExpr :: HasCallStack => Int -- ^ depth
+ -> [Param] -- ^ parameter names
+ -> M Expr
+randSymExpr depth ps = do
+  k <- randint (1, 7 + length ps)
+  if depth <= 1 || k <= 4
+  then do
+    u <- genuniq
+    return $ ESym $ "id-" <> show u
+  else if k <= 7
+  then do
+    ldepth <- randint (1, (depth - 1))
+    l <- randSymExpr ldepth ps
+    rdepth <- randint (1, (depth - 1))
+    r <- randSymExpr rdepth ps
+    case k of
+      5 -> return $ EAdd l r
+      6 -> return $ EMul l r
+      7 -> return $ ELt l r
+  else do
+      ix <- randint (0, k - 8)
+      return $ EParam (ps !! ix)
 
--- | insert an element at the middle of a list
-splice :: [a] -> Int -> a -> [a]
-splice xs i x = take (i - 1) xs ++ [x] ++ drop i xs
 
--- | modify the original program to get a new program
-perturbSymProgram ::
-  Program SymE
-  -> M (Program SymE)
-perturbSymProgram [] = return []
-perturbSymProgram p = do
-  ninstsToModify <- randint (1, length p)
-  ixs <- replicateM ninstsToModify $ randint (0, length p - 1)
-  foldM (\p ix -> do
-    inst' <- randSymInst
-    return $ splice p ix inst') p ixs
+-- | run an expression with values for parameters and symbols
+runExpr :: M.Map String Int8 -> Expr -> Int8
+runExpr _ (EVal i) = i
+runExpr env (ESym s) = env M.! s
+runExpr env (EParam s) = env M.! s
+runExpr env (EAdd e e') = runExpr env e + runExpr env e'
+runExpr env (EMul e e') = runExpr env e * runExpr env e'
+runExpr env (ELt e e') =
+  if runExpr env e < runExpr env e'
+  then 1
+  else 0
+
+
+-- | Return proportion of runs the concrete program
+-- and symbolic program agree on their values
+numAgreeingRuns :: Expr -> Expr -> M Float
+numAgreeingRuns c s = do
+  -- | take parameters from concrete program and
+  -- symbols in abstract program. We need to instantiate
+  -- these with values
+  let names = exprParams c <> exprSymbols s
+  let nruns = 10
+
+  outcomes <- replicateM nruns $ do
+    vals <- replicateM (length names) $ randint8 (-128, 127)
+    let env = M.fromList $ zip names vals
+    pure $ if runExpr env c == runExpr env s then 1 else 0
+  pure $ fromIntegral (sum outcomes) / fromIntegral nruns
 
 
 -- | Find a satisfyng assignment to a symbolic program
-unifySymProgram ::
-  NParams  -- ^ number of parameters
-  -> Program Int32 -- ^ concrete program
-  -> Program SymE -- ^ symbolic program
-  -> M (Maybe (Program Int32))
-unifySymProgram nparams c s = do
-  ids <- replicateM nparams genuniq
-  let params = [SymParam ("param-" <> show i) | i <- ids]
-  -- | Run the program as a symbolic effect on the stack
-  let mvc = runSymbolic (concrete2symProgram c) params
-  -- | Run the symbolic program as the same
-  let mvs = runSymbolic s params
-  smtResult <- liftIO $ sat $ do
-    case liftA2 (,) mvc mvs of
-      Nothing -> return $ 1 .== (0 :: SInt32)
-      Just (vc, vs) -> do
-        -- | We need to be careful here to not double allocate te
-        -- same symbol
-        (sbvc, m) <- compileSymbolicToSBV mempty vc
-        (sbvs, m) <- compileSymbolicToSBV m vs
+unifySymExpr :: HasCallStack => Expr -- ^ concrete program
+  -> Expr -- ^ symbolic program
+  -> M (Maybe (Expr))
+unifySymExpr c s = do
+  smtResult <- liftIO $ satWith z3 $ do
+        setTimeOut 500
+        (sbvc, m) <- compileToSBV mempty c
+        (sbvs, m) <- compileToSBV m s
         return $ sbvc .== sbvs
 
   if not (modelExists smtResult)
@@ -299,34 +237,67 @@ unifySymProgram nparams c s = do
      -- | note that this step may fail, due to the fact that the model
      -- may do something like:
      -- transform push 2; mul
-     -- into: push p; push p; add; where "p" is the symbol of the parameter.
-     else return $ materializeSymProgram smtResult s
+     else do
+       return $ materializeExpr smtResult s
+
+
+-- | Materialize all symbolic nodes with their concrete values if possible
+materializeExpr :: HasCallStack => SatResult -> Expr -> Maybe Expr
+materializeExpr res (EVal v) = return $ EVal v
+materializeExpr res (EAdd e e') =
+  liftA2 EAdd (materializeExpr res e) (materializeExpr res e')
+materializeExpr res (EMul e e') =
+  liftA2 EMul (materializeExpr res e) (materializeExpr res e')
+materializeExpr res (ELt e e') =
+  liftA2 ELt (materializeExpr res e) (materializeExpr res e')
+materializeExpr res (ESym name) =
+  (EVal <$> (getModelValue name res)) <|>
+  (EParam <$> getModelUninterpretedValue name res)
+materializeExpr res (EParam name) = pure (EParam name)
+
+-- | Gather the parameters used by this expression.
+exprParams :: HasCallStack => Expr -> [Param]
+exprParams (EAdd e e') = exprParams e <> exprParams e'
+exprParams (EMul e e') = exprParams e <> exprParams e'
+exprParams (ELt e e') = exprParams e <> exprParams e'
+exprParams (ESym _) = []
+exprParams (EVal _) = []
+exprParams (EParam name) = [name]
+
+
+-- | Gather the symbols used by this expression.
+exprSymbols :: HasCallStack => Expr -> [Param]
+exprSymbols (EAdd e e') = exprSymbols e <> exprSymbols e'
+exprSymbols (EMul e e') = exprSymbols e <> exprSymbols e'
+exprSymbols (ELt e e') = exprSymbols e <> exprSymbols e'
+exprSymbols (ESym s) = [s]
+exprSymbols (EVal _) = []
+exprSymbols (EParam _) = []
+
 
 -- | Provide a score to a random symbolic program.
-scoreSymProgram :: NParams
-  -> Program Int32 -- ^ target program
-  -> Program SymE -- ^ current symbolic program
+scoreExpr :: HasCallStack => Expr -- ^ taget expr
+  -> Expr -- ^ symbolic expr
   -> M Float
-scoreSymProgram nparams c s = do
-  msol <- unifySymProgram nparams c s
-  case msol of
-    Nothing -> return 0.0
-    Just sol -> do
-      inputs <- replicateM nparams (randint32 (1, 4))
-      let Just (_, cost) = runCost concreteTransfer sol inputs
-      return $ 2.0 ** (-1.0 * fromIntegral (getCost cost))
+scoreExpr c s = do
+  nagree <- numAgreeingRuns c s
+  if nagree == 1.0
+  then do
+    msol <- unifySymExpr c s
+    case msol of
+      Nothing -> return nagree
+      Just sol -> return $ 1.5 + 2.0 ** (-1.0 * (costExpr sol))
+  else return nagree
 
 
-
-mhStep :: NParams ->
-      Program Int32 -- ^ concrete program
-      -> Program SymE -- ^ current symbolic program
-      -> M (Program SymE) -- ^ next symbolic program
-mhStep nparams c s = do
-  a <- scoreSymProgram nparams c s
-  -- | perturb the current program to get the next program
-  s' <- randSymProgram (length c * 2) -- perturbSymProgram s
-  a' <- scoreSymProgram nparams c s'
+mhStep :: HasCallStack => Expr -- ^ concrete expression
+      -> Expr -- ^ current symbolic expression
+      -> M (Expr) -- ^ next symbolic program
+mhStep c s = do
+  a <- scoreExpr c s
+  -- | get a new random expression
+  s' <- randConcreteExpr 4 (exprParams c)
+  a' <- scoreExpr c s'
   -- | find acceptance ratio
   let accept = a' / a
   r <- randfloat (0, 1)
@@ -334,49 +305,40 @@ mhStep nparams c s = do
 
 
 mhSteps :: Int
-        -> NParams
-        -> Program Int32
-        -> Program SymE -> M (Program SymE)
-mhSteps 0 nparams c s = return s
-mhSteps i nparams c s =
-  mhStep nparams c s >>= \s' -> mhSteps (i - 1) nparams c s'
+        -> Expr
+        -> Expr -> M (Expr)
+mhSteps 0 c s = return s
+mhSteps i c s =
+  mhStep c s >>= \s' -> mhSteps (i - 1) c s'
 
--- | get a lazy of sampled programs
-runMH :: Int
-      -> NParams
-      -> Program Int32 -> Program SymE -> M [Program SymE]
-runMH 0 nparams _ _ = return []
-runMH i nparams c s = do
-     s' <- mhSteps 10 nparams c s
-     nexts <- runMH (i - 1) nparams c s'
+-- | Get a list of sampled programs
+runMH :: HasCallStack => Int -> Expr -> Expr -> M [Expr]
+runMH 0 _ _ = return []
+runMH i c s = do
+     s' <- mhSteps 5 c s
+     nexts <- runMH (i - 1) c s'
      return $ s:nexts
 
 
-optimise :: NParams -- ^ number of parameters
-            -> Program Int32  -- ^ original program
-            -> M [Program Int32]
-optimise nparams p = do
-  s <- randSymProgram (length p  * 2)
-  samples <- runMH 10 nparams p s
-  nub <$> catMaybes <$> traverse (unifySymProgram nparams p) samples
+optimise :: HasCallStack => Expr -> M [Expr]
+optimise c = do
+  s <- randConcreteExpr 3 (exprParams c)
+  samples <- runMH 300 c s
+  nub <$> catMaybes <$> traverse (unifySymExpr c) samples
 
 
 -- | Given number of params, run the program and find equivalent programs
-mainProgram :: NParams -> Program Int32 -> M ()
-mainProgram nparams p = do
+optimiseAndLog :: HasCallStack => Expr -> M ()
+optimiseAndLog c = do
     liftIO $ putStrLn $ "----"
-    liftIO $ putStrLn $ "program: " <> show p
-    let params = [SymParam $ "p-" <> show i | i <- [1..nparams]]
-    liftIO $ print $ runSymbolic (concrete2symProgram p) params
-    opts <- optimise nparams p
-    forM_ opts $ \p' -> do
-          liftIO $ print p'
-          liftIO $ print $ runSymbolic (concrete2symProgram p') params
-          let Just (_, cost) =  runCost symbolicTransfer (concrete2symProgram p') params
-          liftIO $ putStrLn $ "  cost: " <> show cost
+    liftIO $ putStrLn $ "program: " <> show c
+    opts <- optimise c
+    forM_ opts $ \s -> do
+          liftIO $ print s
+          liftIO $ putStrLn $ "  cost: " <> show (costExpr s)
 
-main :: IO ()
+main :: HasCallStack => IO ()
 main = evalM $ do
-  mainProgram 0 [Push 2, Push 3, Push 3, Mul, Add]
-  mainProgram 1 [Push 2, Mul]
+  optimiseAndLog (EMul (EVal 2) (EVal 3))
+  optimiseAndLog (EMul (EVal 2) (EParam "x"))
 

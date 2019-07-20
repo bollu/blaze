@@ -59,12 +59,10 @@ executable tendflame
   -- other-extensions:
 
   -- Other library packages from which modules are imported.
-  build-depends:       base ^>=4.10.1.0
+  build-depends:       base >= 4.11
                        , containers
                        , mtl
-                       , sbv
-                       , monad-bayes
-                       , monad-parallel
+                       , sbv >= 8.3
                        , random
 
   -- Directories containing source files.
