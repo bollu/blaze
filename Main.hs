@@ -293,17 +293,22 @@ p1 = [Push 2
      , Push 3
      , Mul
      , Add]
+type NParams = Int
+optimise :: NParams -- ^ number of parameters
+                 -> Program Int32  -- ^ original program
+                 -> M [Program Int32]
+optimise nparams p = do
+  s <- randSymProgram (length p1 * 2)
+  samples <- runMH 100 p1 s
+  nub <$> catMaybes <$> traverse (unifySymProgram p) samples
 
 main :: IO ()
 main = do
     print $ "program: " <> show p1
     print $ runConcrete p1 []
     evalM $ do
-      s <- randSymProgram (length p1)
-      perturbs <- perturbSymProgram s
-      samples <- runMH 100 p1 s
-      unifieds <- nub <$> catMaybes <$> traverse (unifySymProgram p1) samples
-      forM_ unifieds $ \p -> do
+      opts <- optimise 0 p1
+      forM_ opts $ \p -> do
             liftIO $ print p
             let Just (_, cost) =  runCost concreteTransfer p []
             liftIO $ putStrLn $ "  cost: " <> show cost
