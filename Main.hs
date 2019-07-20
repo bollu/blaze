@@ -7,7 +7,7 @@
 module Main where
 import GHC.Stack
 import Data.Maybe (catMaybes)
-import Data.List (nub)
+import Data.List (nub, sortOn)
 -- | Here, we consider a small implementation of the
 -- STOKE paper, where we stochastically optimise over a
 -- large space of programs.
@@ -47,6 +47,8 @@ debug s = liftIO $ putStrLn $ " >" <> s
 -- | Parameter
 type Param = String
 
+
+-- | Expressions
 data Expr = EVal Int8
           | ESym String
           | EParam Param
@@ -131,29 +133,22 @@ randbool :: M Bool
 randbool = liftIO $ getStdRandom $ random
 
 -- | Generate a random _concrete_ expression
-randConcreteExpr :: Int -- ^ depth
+randExpr :: Int -- ^ depth
  -> [Param] -- ^ parameter names
  -> M Expr
-randConcreteExpr depth ps = do
+randExpr depth ps = do
   k <- randint (1, 7 + length ps)
   if depth <= 1 || k <= 4
   then do
     r <- randbool
     k <- randint8 (-128, 127) -- int8
     return $ EVal k
-
-    -- if r then do
-    --   k <- randint8 (-128, 127) -- int8
-    --   return $ eval k
-    -- else do
-    --   u <- genuniq
-    --   return $ ESym $ "id-" <> show u
   else if k <= 7
   then do
     ldepth <- randint (1, (depth - 1))
-    l <- randConcreteExpr ldepth ps
+    l <- randExpr ldepth ps
     rdepth <- randint (1, (depth - 1))
-    r <-  randConcreteExpr rdepth ps
+    r <-  randExpr rdepth ps
     case k of
       5 -> return $ EAdd l r
       6 -> return $ EMul l r
@@ -170,31 +165,6 @@ exprHasSym (EVal _) = False
 exprHasSym (EAdd e e') = exprHasSym e || exprHasSym e'
 exprHasSym (EMul e e') = exprHasSym e || exprHasSym e'
 exprHasSym (ELt e e') = exprHasSym e || exprHasSym e'
-
-
--- | Generate a random symbolic expression
-randSymExpr :: HasCallStack => Int -- ^ depth
- -> [Param] -- ^ parameter names
- -> M Expr
-randSymExpr depth ps = do
-  k <- randint (1, 7 + length ps)
-  if depth <= 1 || k <= 4
-  then do
-    u <- genuniq
-    return $ ESym $ "id-" <> show u
-  else if k <= 7
-  then do
-    ldepth <- randint (1, (depth - 1))
-    l <- randSymExpr ldepth ps
-    rdepth <- randint (1, (depth - 1))
-    r <- randSymExpr rdepth ps
-    case k of
-      5 -> return $ EAdd l r
-      6 -> return $ EMul l r
-      7 -> return $ ELt l r
-  else do
-      ix <- randint (0, k - 8)
-      return $ EParam (ps !! ix)
 
 
 -- | run an expression with values for parameters and symbols
@@ -306,7 +276,7 @@ mhStep :: HasCallStack => Expr -- ^ concrete expression, score
       -> M (Float, Expr) -- ^ next symbolic program, score
 mhStep c (score, s) = do
   -- | get a new random expression
-  s' <- randConcreteExpr 4 (exprParams c)
+  s' <- randExpr 4 (exprParams c)
   score' <- scoreExpr c s'
   -- | find acceptance ratio
   let accept = score' / score
@@ -340,15 +310,14 @@ optimise :: HasCallStack => Expr -> M [Expr]
 optimise c = do
   samples <- runMH 3000 c
   -- | score >= 1 means that it unified.
-  return $ nub $ [e | (score, e) <- samples, score >= unifyScore]
-
+  return $  nub $ sortOn costExpr $ [e | (score, e) <- samples, score >= unifyScore]
 
 -- | Given number of params, run the program and find equivalent programs
 optimiseAndLog :: HasCallStack => Expr -> M ()
 optimiseAndLog c = do
     liftIO $ putStrLn $ "----"
     liftIO $ putStrLn $ "program: " <> show c
-    opts <- optimise c
+    opts <- take 3 <$> optimise c
     forM_ opts $ \s -> do
           liftIO $ print s
           liftIO $ putStrLn $ "  cost: " <> show (costExpr s)
@@ -358,4 +327,5 @@ main = evalM $ do
   optimiseAndLog (EMul (EVal 2) (EVal 3))
   optimiseAndLog (EMul (EVal 2) (EParam "x"))
   optimiseAndLog (ELt (EMul (EParam "x") (EVal 1)) (EMul (EParam "y") (EVal 1)))
+
 
