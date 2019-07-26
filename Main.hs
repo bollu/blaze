@@ -72,7 +72,7 @@ perturbProgram :: Program -> IO Program
 perturbProgram Program{..} = do
   r <- randint (1, 3)
   ix <- randint (0, length progInsts - 1)
-  ix' <- (ix +) <$> randint (0, length progInsts - 1)
+  ix' <- randint (ix, length progInsts - 1)
   progInsts <- case r of
                  1 -> pure $ dropListElems progInsts ix ix'
                  2 -> replaceListElem progInsts ix <$> randInst

@@ -24,6 +24,7 @@ docs
 node_modules
 old
 out
+stack.yaml.lock
 tags
 TODO.txt
 wiki
