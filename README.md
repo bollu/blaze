@@ -1,5 +1,8 @@
 blaze
 ----------
+
+### [Link to tutorial IPython noteboook](https://github.com/bollu/blaze/blob/master/notebooks/tutorial.ipynb)
+
 A reimplementation of STOKE in haskell.
 
 STOKE is a superoptimizer that finds optimal instruction sequences
